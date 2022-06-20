@@ -2,6 +2,7 @@
 ## some mainstream backbones with PyTorch implementation.
 
 New add !!!
-- [X] MobileViTv1 s-xs-xxs 
+- [x] MobileViTv1 s-xs-xxs 
+- [x] PP-LCNetv2 base
 - [ ] MobileViTv2
 - [ ] MobileOne
