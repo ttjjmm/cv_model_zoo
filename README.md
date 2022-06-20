@@ -1,7 +1,7 @@
-# cv_model_zoo
+## CV Model ZOO
+# some mainstream backbones with PyTorch implementation
 
-
-New add
+New add !!!
 - [X] MobileViTv1 s-xs-xxs 
 - [ ] MobileViTv2
 - [ ] MobileOne
