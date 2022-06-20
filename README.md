@@ -2,4 +2,4 @@
 
 
 New add
-- [ X ] MobileViTv1 s-xs-xxs
+- [X] MobileViTv1 s-xs-xxs 
