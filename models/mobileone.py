@@ -5,7 +5,7 @@ import torch.nn.functional as F
 
 
 class ConvBnLayer(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size=3, stride=1):
+    def __init__(self, in_channels, out_channels, kernel_size=3, groups=1, stride=1):
         super(ConvBnLayer, self).__init__()
         self.kernel_size = kernel_size
         self.conv = nn.Conv2d(
@@ -14,7 +14,7 @@ class ConvBnLayer(nn.Module):
             kernel_size=(kernel_size, kernel_size),
             stride=(stride, stride),
             padding=(kernel_size // 2, kernel_size // 2),
-            groups=out_channels,
+            groups=groups,
             bias=False
         )
         self.bn = nn.BatchNorm2d(out_channels)
@@ -38,20 +38,21 @@ class MobileOneBlock(nn.Module):
            ConvBnLayer(in_channels=in_channels,
                        out_channels=in_channels,
                        kernel_size=kernel_size,
+                       groups=in_channels,
                        stride=stride) for _ in range(k_blocks)
         )
         self.conv1x1 = ConvBnLayer(in_channels=in_channels,
-                                   out_channels=out_channels,
+                                   out_channels=in_channels,
                                    kernel_size=1,
                                    stride=stride)
-        self.bn1 = nn.BatchNorm2d(in_channels)
+        self.bn1 = nn.BatchNorm2d(in_channels) if stride == 1 else None
         # point-wise convs
         self.pw_conv = nn.ModuleList(
             ConvBnLayer(in_channels=in_channels,
                         out_channels=out_channels,
                         kernel_size=1) for _ in range(k_blocks)
         )
-        self.bn2 = nn.BatchNorm2d(in_channels)
+        self.bn2 = nn.BatchNorm2d(in_channels) if in_channels == out_channels else None
         self.act = nn.ReLU(inplace=True)
 
     def forward(self, x):
@@ -61,13 +62,18 @@ class MobileOneBlock(nn.Module):
             return x
         else:
             identity = x
-            for conv in self.dw_conv:
-                x = conv(x)
-            x = self.act(x + self.conv1x1(identity) + self.bn1(identity))
+            x = sum([conv(x) for conv in self.dw_conv])
+            if self.bn1 is not None:
+                x = self.act(x + self.conv1x1(identity) + self.bn1(identity))
+            else:
+                x = self.act(x + self.conv1x1(identity))
             identity = x
-            for conv in self.dw_conv:
-                x = conv(x)
-            x = self.act(x + self.bn2(identity))
+            x = sum([conv(x) for conv in self.pw_conv])
+            if self.bn2 is not None:
+                x = self.act(x + self.bn2(identity))
+            else:
+                x = self.act(x)
+
             return x
 
     def deploy(self):
@@ -134,8 +140,55 @@ class MobileOneBlock(nn.Module):
         return F.pad(tensor, [pad, pad, pad, pad])
 
 
+mbone_s0 = [
+    [64, 2, 1 ,0.75, 4],
+    [64, 2, 2 ,0.75, 4],
+    [128, 2, 8 ,1.0, 4],
+    [256, 2, 5 ,1.0, 4],
+    [256, 1, 5 ,1.0, 4],
+    [512, 2, 1 ,2.0, 4],
+]
+
+
+class MobileOne(nn.Module):
+    def __init__(self, cfg):
+        super(MobileOne, self).__init__()
+        self.num_stages = len(cfg)
+        in_channels = 3
+        for idx in range(self.num_stages):
+            base_chs, stride, n_blocks, alpha, k = cfg[idx]
+            setattr(
+                self,
+                'stage{}'.format(idx),
+                self._build_satge(in_channels, stride, base_chs, n_blocks, alpha, k),
+            )
+            in_channels = base_chs * alpha
+
+    def forward(self, x):
+        for idx in range(self.num_stages):
+            stage = getattr(self, 'stage{}'.format(idx))
+            x = stage(x)
+        return x
+
+    @staticmethod
+    def _build_satge(in_chs, stride, base_chs, n_blocks, alpha, k):
+        block_list = []
+        for idx in range(n_blocks):
+            if idx == 0:
+                in_ch = in_chs
+                s = stride
+            else:
+                in_ch = base_chs * alpha
+                s = 1
+            block_list.append(
+                MobileOneBlock(in_channels=in_ch, out_channels=base_chs * alpha, stride=s, k_blocks=k)
+            )
+        return nn.Sequential(*block_list)
+
 
 if __name__ == '__main__':
-    m = MobileOneBlock(8, 8)
-    # m.deploy()
-    print(m)
+    m = MobileOne(mbone_s0)
+    # m = MobileOneBlock(3, 16, stride=2)
+    # inp = torch.randn((4, 3, 20, 20))
+    # print(m(inp).shape)
+
