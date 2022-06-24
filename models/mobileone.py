@@ -57,7 +57,7 @@ class MobileOneBlock(nn.Module):
                         out_channels=out_channels,
                         kernel_size=1) for _ in range(k_blocks)
         )
-
+        # activation
         self.act = nn.ReLU(inplace=True)
 
     def forward(self, x):
@@ -197,7 +197,6 @@ class MobileOne(nn.Module):
             in_channels = int(base_chs * alpha)
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
         self.fc = nn.Linear(1024, 1000)
-
 
     def forward(self, x):
         x = self.stage0(x)
