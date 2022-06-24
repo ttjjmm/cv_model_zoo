@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
+from icecream import ic
 
 
 class ConvBnLayer(nn.Module):
@@ -44,7 +44,8 @@ class MobileOneBlock(nn.Module):
         self.conv1x1 = ConvBnLayer(in_channels=in_channels,
                                    out_channels=in_channels,
                                    kernel_size=1,
-                                   stride=stride)
+                                   stride=stride,
+                                   groups=in_channels)
         self.bn1 = nn.BatchNorm2d(in_channels) if stride == 1 else None
         # point-wise convs
         self.pw_conv = nn.ModuleList(
@@ -80,20 +81,26 @@ class MobileOneBlock(nn.Module):
         self.is_deploy = True
         k_dw, b_dw = self._get_equivalent_kernel_bias(self.dw_conv, self.kernel_size)
         k_conv1x1, b_conv1x1 = self._fuse_bn_tensor(self.conv1x1)
-        k_bn, b_bn = self._fuse_bn_tensor(self.bn1)
-        k_dw, b_dw = k_dw + k_conv1x1 + self._pad_tensor(k_bn, self.kernel_size), b_dw + b_conv1x1 + b_bn
+        if self.bn1 is not None:
+            k_bn, b_bn = self._fuse_bn_tensor(self.bn1)
+            k_dw, b_dw = k_dw + k_conv1x1 + self._pad_tensor(k_bn, self.kernel_size), b_dw + b_conv1x1 + b_bn
+        else:
+            k_dw, b_dw = k_dw + k_conv1x1, b_dw + b_conv1x1
         self.dw_conv = nn.Conv2d(in_channels=self.in_channels,
                                  out_channels=self.in_channels,
                                  kernel_size=(self.kernel_size, self.kernel_size),
                                  stride=(self.stride, self.stride),
                                  padding=(self.kernel_size // 2, self.kernel_size // 2),
                                  groups=self.in_channels)
+        # print(k_dw.shape)
         self.dw_conv.weight.data = k_dw
         self.dw_conv.bias.data = b_dw
 
         k_pw, b_pw = self._get_equivalent_kernel_bias(self.pw_conv, 1)
-        k_bn, b_bn = self._fuse_bn_tensor(self.bn2)
-        k_pw, b_pw = k_pw + k_bn, b_pw + b_bn
+        if self.bn2 is not None:
+            k_bn, b_bn = self._fuse_bn_tensor(self.bn2)
+            k_pw, b_pw = k_pw + k_bn, b_pw + b_bn
+
         self.pw_conv = nn.Conv2d(in_channels=self.in_channels,
                                  out_channels=self.out_channels,
                                  kernel_size=(1, 1))
@@ -101,8 +108,10 @@ class MobileOneBlock(nn.Module):
         self.pw_conv.bias.data = b_pw
 
         self.__delattr__('conv1x1')
-        self.__delattr__('bn1')
-        self.__delattr__('bn2')
+        if hasattr(self, 'bn1'):
+            self.__delattr__('bn1')
+        if hasattr(self, 'bn2'):
+            self.__delattr__('bn2')
 
     def _get_equivalent_kernel_bias(self, conv_list, kernel_size):
         kernel_sum = 0
@@ -162,7 +171,7 @@ class MobileOne(nn.Module):
                 'stage{}'.format(idx),
                 self._build_satge(in_channels, stride, base_chs, n_blocks, alpha, k),
             )
-            in_channels = base_chs * alpha
+            in_channels = int(base_chs * alpha)
 
     def forward(self, x):
         for idx in range(self.num_stages):
@@ -178,17 +187,29 @@ class MobileOne(nn.Module):
                 in_ch = in_chs
                 s = stride
             else:
-                in_ch = base_chs * alpha
+                in_ch = int(base_chs * alpha)
                 s = 1
             block_list.append(
-                MobileOneBlock(in_channels=in_ch, out_channels=base_chs * alpha, stride=s, k_blocks=k)
+                MobileOneBlock(in_channels=in_ch, out_channels=int(base_chs * alpha), stride=s, k_blocks=k)
             )
         return nn.Sequential(*block_list)
+
+    def switch_to_deploy(self):
+        for idx in range(self.num_stages):
+            stage = getattr(self, 'stage{}'.format(idx))
+            for block in stage:
+                if isinstance(block, MobileOneBlock):
+                    block.deploy()
 
 
 if __name__ == '__main__':
     m = MobileOne(mbone_s0)
+    m.switch_to_deploy()
+    print(m)
     # m = MobileOneBlock(3, 16, stride=2)
-    # inp = torch.randn((4, 3, 20, 20))
+    # m.deploy()
+    #
+    # print(m)
+    # inp = torch.randn((4, 3, 320, 320))
     # print(m(inp).shape)
 
