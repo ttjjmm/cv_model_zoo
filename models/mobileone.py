@@ -84,11 +84,8 @@ class MobileOneBlock(nn.Module):
         self.is_deploy = True
         k_dw, b_dw = self._get_equivalent_kernel_bias(self.dw_conv, self.kernel_size)
         k_conv1x1, b_conv1x1 = self._fuse_bn_tensor(self.conv1x1)
-        # if self.bn1 is not None:
         k_bn, b_bn = self._fuse_bn_tensor(self.bn1, groups=self.in_channels)
         k_dw, b_dw = k_dw + k_bn + self._pad_tensor(k_conv1x1, self.kernel_size), b_dw + b_bn + b_conv1x1
-        # else:
-        #     k_dw, b_dw = k_dw + k_conv1x1, b_dw + b_conv1x1
         self.dw_conv = nn.Conv2d(in_channels=self.in_channels,
                                  out_channels=self.in_channels,
                                  kernel_size=(self.kernel_size, self.kernel_size),
@@ -100,7 +97,6 @@ class MobileOneBlock(nn.Module):
         self.dw_conv.bias.data = b_dw
 
         k_pw, b_pw = self._get_equivalent_kernel_bias(self.pw_conv, 1)
-        # if self.bn2 is not None:
         k_bn, b_bn = self._fuse_bn_tensor(self.bn2, groups=1)
         k_pw, b_pw = k_pw + k_bn, b_pw + b_bn
 
