@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -34,6 +35,7 @@ class MobileOneBlock(nn.Module):
         self.stride = stride
         self.is_deploy = False
         # depth-wise convs
+        self.bn1 = nn.BatchNorm2d(in_channels) if (in_channels == out_channels and stride == 1) else None
         self.dw_conv = nn.ModuleList(
            ConvBnLayer(in_channels=in_channels,
                        out_channels=in_channels,
@@ -41,19 +43,21 @@ class MobileOneBlock(nn.Module):
                        groups=in_channels,
                        stride=stride) for _ in range(k_blocks)
         )
+
         self.conv1x1 = ConvBnLayer(in_channels=in_channels,
                                    out_channels=in_channels,
                                    kernel_size=1,
                                    stride=stride,
                                    groups=in_channels)
-        self.bn1 = nn.BatchNorm2d(in_channels) if stride == 1 else None
+
         # point-wise convs
+        self.bn2 = nn.BatchNorm2d(in_channels) if (in_channels == out_channels and stride == 1) else None
         self.pw_conv = nn.ModuleList(
             ConvBnLayer(in_channels=in_channels,
                         out_channels=out_channels,
                         kernel_size=1) for _ in range(k_blocks)
         )
-        self.bn2 = nn.BatchNorm2d(in_channels) if in_channels == out_channels else None
+
         self.act = nn.ReLU(inplace=True)
 
     def forward(self, x):
@@ -74,32 +78,31 @@ class MobileOneBlock(nn.Module):
                 x = self.act(x + self.bn2(identity))
             else:
                 x = self.act(x)
-
             return x
 
     def deploy(self):
         self.is_deploy = True
         k_dw, b_dw = self._get_equivalent_kernel_bias(self.dw_conv, self.kernel_size)
         k_conv1x1, b_conv1x1 = self._fuse_bn_tensor(self.conv1x1)
-        if self.bn1 is not None:
-            k_bn, b_bn = self._fuse_bn_tensor(self.bn1)
-            k_dw, b_dw = k_dw + k_conv1x1 + self._pad_tensor(k_bn, self.kernel_size), b_dw + b_conv1x1 + b_bn
-        else:
-            k_dw, b_dw = k_dw + k_conv1x1, b_dw + b_conv1x1
+        # if self.bn1 is not None:
+        k_bn, b_bn = self._fuse_bn_tensor(self.bn1, groups=self.in_channels)
+        k_dw, b_dw = k_dw + k_bn + self._pad_tensor(k_conv1x1, self.kernel_size), b_dw + b_bn + b_conv1x1
+        # else:
+        #     k_dw, b_dw = k_dw + k_conv1x1, b_dw + b_conv1x1
         self.dw_conv = nn.Conv2d(in_channels=self.in_channels,
                                  out_channels=self.in_channels,
                                  kernel_size=(self.kernel_size, self.kernel_size),
                                  stride=(self.stride, self.stride),
                                  padding=(self.kernel_size // 2, self.kernel_size // 2),
                                  groups=self.in_channels)
-        # print(k_dw.shape)
+
         self.dw_conv.weight.data = k_dw
         self.dw_conv.bias.data = b_dw
 
         k_pw, b_pw = self._get_equivalent_kernel_bias(self.pw_conv, 1)
-        if self.bn2 is not None:
-            k_bn, b_bn = self._fuse_bn_tensor(self.bn2)
-            k_pw, b_pw = k_pw + k_bn, b_pw + b_bn
+        # if self.bn2 is not None:
+        k_bn, b_bn = self._fuse_bn_tensor(self.bn2, groups=1)
+        k_pw, b_pw = k_pw + k_bn, b_pw + b_bn
 
         self.pw_conv = nn.Conv2d(in_channels=self.in_channels,
                                  out_channels=self.out_channels,
@@ -114,30 +117,43 @@ class MobileOneBlock(nn.Module):
             self.__delattr__('bn2')
 
     def _get_equivalent_kernel_bias(self, conv_list, kernel_size):
-        kernel_sum = 0
-        bias_sum = 0
+        kernel_sum = []
+        bias_sum = []
         for conv in conv_list:
             kernel, bias = self._fuse_bn_tensor(conv)
             kernel = self._pad_tensor(kernel, to_size=kernel_size)
-            kernel_sum += kernel
-            bias_sum += bias
-        return kernel_sum, bias_sum
+            kernel_sum.append(kernel)
+            bias_sum.append(bias)
+        return sum(kernel_sum), sum(bias_sum)
 
-    @staticmethod
-    def _fuse_bn_tensor(branch):
-        if hasattr(branch, 'conv'):
+    def _fuse_bn_tensor(self, branch, groups=None):
+        if branch is None:
+            return 0, 0
+        if isinstance(branch, ConvBnLayer):
             kernel = branch.conv.weight
-            bn = branch.bn
+            running_mean = branch.bn.running_mean
+            running_var = branch.bn.running_var
+            gamma = branch.bn.weight
+            beta = branch.bn.bias
+            eps = branch.bn.eps
         else:
-            kernel = 1
-            bn = branch
-        running_mean = bn.running_mean
-        running_var = bn.running_var
-        gamma = bn.weight
-        beta = bn.bias
-        eps = bn.eps
+            assert isinstance(branch, nn.BatchNorm2d)
+            input_dim = self.in_channels // groups  # self.groups
+            ks = 1 if groups == 1 else 3
+            kernel_value = np.zeros((self.in_channels, input_dim, ks, ks), dtype=np.float32)
+            for i in range(self.in_channels):
+                if ks == 1:
+                    kernel_value[i, i % input_dim, 0, 0] = 1
+                else:
+                    kernel_value[i, i % input_dim, 1, 1] = 1
+            kernel = torch.from_numpy(kernel_value).to(branch.weight.device)
+            running_mean = branch.running_mean
+            running_var = branch.running_var
+            gamma = branch.weight
+            beta = branch.bias
+            eps = branch.eps
         std = (running_var + eps).sqrt()
-        t = (gamma / std).reshape((-1, 1, 1, 1))
+        t = (gamma / std).reshape(-1, 1, 1, 1)
         return kernel * t, beta - running_mean * gamma / std
 
     @staticmethod
@@ -163,8 +179,15 @@ class MobileOne(nn.Module):
     def __init__(self, cfg):
         super(MobileOne, self).__init__()
         self.num_stages = len(cfg)
-        in_channels = 3
-        for idx in range(self.num_stages):
+
+        self.stage0 = nn.Sequential(
+            nn.Conv2d(3, 48, (3, 3), (2, 2), 1, bias=False),
+            nn.BatchNorm2d(48),
+            nn.ReLU(inplace=True),
+        )
+
+        in_channels = 48
+        for idx in range(1, self.num_stages):
             base_chs, stride, n_blocks, alpha, k = cfg[idx]
             setattr(
                 self,
@@ -172,11 +195,18 @@ class MobileOne(nn.Module):
                 self._build_satge(in_channels, stride, base_chs, n_blocks, alpha, k),
             )
             in_channels = int(base_chs * alpha)
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Linear(1024, 1000)
+
 
     def forward(self, x):
-        for idx in range(self.num_stages):
+        x = self.stage0(x)
+        for idx in range(1, self.num_stages):
             stage = getattr(self, 'stage{}'.format(idx))
             x = stage(x)
+        x = self.avg_pool(x)
+        x = torch.flatten(x, start_dim=1)  # b, c
+        x = self.fc(x)
         return x
 
     @staticmethod
@@ -195,7 +225,7 @@ class MobileOne(nn.Module):
         return nn.Sequential(*block_list)
 
     def switch_to_deploy(self):
-        for idx in range(self.num_stages):
+        for idx in range(1, self.num_stages):
             stage = getattr(self, 'stage{}'.format(idx))
             for block in stage:
                 if isinstance(block, MobileOneBlock):
@@ -206,10 +236,3 @@ if __name__ == '__main__':
     m = MobileOne(mbone_s0)
     m.switch_to_deploy()
     print(m)
-    # m = MobileOneBlock(3, 16, stride=2)
-    # m.deploy()
-    #
-    # print(m)
-    # inp = torch.randn((4, 3, 320, 320))
-    # print(m(inp).shape)
-
