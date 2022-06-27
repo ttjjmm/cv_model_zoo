@@ -96,7 +96,8 @@ class RepDepthwiseSeparable(nn.Module):
                  use_shortcut=False):
         super(RepDepthwiseSeparable, self).__init__()
         self.is_repped = False
-
+        self.in_channels = in_channels
+        self.stride = stride
         self.dw_size = dw_size
         self.split_pw = split_pw
         self.use_rep = use_rep
@@ -183,18 +184,26 @@ class RepDepthwiseSeparable(nn.Module):
         if self.use_rep:
             self.is_repped = True
             kernel, bias = self._get_equivalent_kernel_bias()
-            self.dw_conv.weight.set_value(kernel)
-            self.dw_conv.bias.set_value(bias)
+
+            # self.dw_conv = nn.Conv2d(
+            #     in_channels=self.in_channels,
+            #     out_channels=self.in_channels,
+            #     kernel_size=(3, 3),
+            #     stride=(self.stride, self.stride),
+            #     padding=(1, 1)
+            # )
+            self.dw_conv.weight.data = kernel
+            self.dw_conv.bias.data = bias
 
     def _get_equivalent_kernel_bias(self):
-        kernel_sum = 0
-        bias_sum = 0
+        kernel_sum = []
+        bias_sum = []
         for dw_conv in self.dw_conv_list:
             kernel, bias = self._fuse_bn_tensor(dw_conv)
             kernel = self._pad_tensor(kernel, to_size=self.dw_size)
-            kernel_sum += kernel
-            bias_sum += bias
-        return kernel_sum, bias_sum
+            kernel_sum.append(kernel)
+            bias_sum.append(bias)
+        return sum(kernel_sum), sum(bias_sum)
 
     @staticmethod
     def _fuse_bn_tensor(branch):
@@ -266,8 +275,7 @@ class PPLCNetV2(nn.Module):
 
         if self.use_last_conv:
             self.last_conv = nn.Conv2d(
-                in_channels=make_divisible(NET_CONFIG["stage4"][0] * 2 *
-                                           scale),
+                in_channels=make_divisible(NET_CONFIG["stage4"][0] * 2 * scale),
                 out_channels=self.class_expand,
                 kernel_size=1,
                 stride=1,
@@ -277,8 +285,7 @@ class PPLCNetV2(nn.Module):
             self.dropout = nn.Dropout(p=dropout_prob)
 
         self.flatten = nn.Flatten(start_dim=1, end_dim=-1)
-        in_features = self.class_expand if self.use_last_conv else NET_CONFIG[
-            "stage4"][0] * 2 * scale
+        in_features = self.class_expand if self.use_last_conv else NET_CONFIG["stage4"][0] * 2 * scale
         self.fc = nn.Linear(in_features, class_num)
 
     def forward(self, x):
@@ -295,27 +302,36 @@ class PPLCNetV2(nn.Module):
         return x
 
 
+    def switch_to_deploy(self):
+        pass
 
 
 if __name__ == '__main__':
-    from collections import OrderedDict
-    model_state = OrderedDict()
-    new_state = OrderedDict()
-    model = PPLCNetV2(scale=1.0, depths=[2, 2, 6, 2], dropout_prob=0.2)
-    for k, v in model.state_dict().items():
-        if k.split('.')[-1] != 'num_batches_tracked':
-            model_state[k] = v
-    old_dict = torch.load('../utils/PPLCNetV2_base_pretrained.pth')
+    # from collections import OrderedDict
+    # model_state = OrderedDict()
+    # new_state = OrderedDict()
+    # model = PPLCNetV2(scale=1.0, depths=[2, 2, 6, 2], dropout_prob=0.2)
+    # for k, v in model.state_dict().items():
+    #     if k.split('.')[-1] != 'num_batches_tracked':
+    #         model_state[k] = v
+    # old_dict = torch.load('../utils/PPLCNetV2_base_pretrained.pth')
+    #
+    # for (k1, v1), (k2, v2) in zip(model_state.items(), old_dict.items()):
+    #     if k1.split('.')[-2] == 'fc' and len(v2.shape) == 2:
+    #         # print(v2.shape)
+    #         v2 = v2.transpose(0, 1)
+    #
+    #     assert v1.shape == v2.shape, (v1.shape, v2.shape)
+    #     new_state[k1] = v2
+    #
+    # torch.save(new_state, '../pretrains/PPLCNetV2_base_pretrained.pt')
+    #
+    # model.load_state_dict(new_state, strict=True)
 
-    for (k1, v1), (k2, v2) in zip(model_state.items(), old_dict.items()):
-        if k1.split('.')[-2] == 'fc' and len(v2.shape) == 2:
-            # print(v2.shape)
-            v2 = v2.transpose(0, 1)
+    m = RepDepthwiseSeparable(16, 16, stride=1, use_rep=True)
+    print(m)
+    m.rep()
+    inp = torch.randn((4, 16, 40, 40))
+    print(m(inp).shape)
 
-        assert v1.shape == v2.shape, (v1.shape, v2.shape)
-        new_state[k1] = v2
-
-    torch.save(new_state, '../pretrains/PPLCNetV2_base_pretrained.pt')
-
-    model.load_state_dict(new_state, strict=True)
 
