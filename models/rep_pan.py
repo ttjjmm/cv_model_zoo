@@ -330,3 +330,43 @@ if __name__ == '__main__':
 
 
 
+class EffiDecoupleHead(nn.Module):
+    def __init__(self, inch, num_classes, num_anchors):
+        super(EffiDecoupleHead, self).__init__()
+        base_ch = inch
+        self.conv = Conv(inch, base_ch, k=1)
+        self.conv_cls = Conv(base_ch, base_ch, k=3, p=1)
+        self.conv_reg = Conv(base_ch, base_ch, k=3, p=1)
+        self.cls_pred = nn.Conv2d(base_ch, num_classes * num_anchors, (1, 1))
+        self.reg_pred = nn.Conv2d(base_ch, 4 * num_anchors, (1, 1))
+        self.obj_pred = nn.Conv2d(base_ch, 1 * num_anchors, (1, 1))
+
+    def forward(self, x):
+        x = self.conv(x)
+        cls = self.conv_cls(x)
+        reg = self.conv_reg(x)
+        cls_pred = self.cls_pred(cls)
+        obj_pred = self.obj_pred(cls)
+        reg_pred = self.reg_pred(reg)
+        return torch.cat([reg_pred, obj_pred, cls_pred], 1)
+
+    def _initialize_biases(self, cf=None):  # initialize biases into Detect(), cf is class frequency
+        # https://arxiv.org/abs/1708.02002 section 3.3
+        # cf = torch.bincount(torch.tensor(np.concatenate(dataset.labels, 0)[:, 0]).long(), minlength=nc) + 1.
+        m = self.model[-1]  # Detect() module
+        for mi, s in zip(m.m, m.stride):  # from
+            # print(mi)
+            if isinstance(mi, nn.Conv2d):
+                b = mi.bias.view(m.na, -1).detach()  # conv.bias(255) to (3,85)
+                # print(b[:, 4].shape)
+                # print(b)
+                b[:, 4] += math.log(8 / (640 / s) ** 2)  # obj (8 objects per 640 image)
+                b[:, 5:] += math.log(0.6 / (m.nc - 0.999999)) if cf is None else torch.log(cf / cf.sum())  # cls
+                mi.bias = torch.nn.Parameter(b.view(-1), requires_grad=True)
+            elif isinstance(mi, EffiDecoupleHead):
+                b = mi.obj_pred.bias.view(m.na).detach()
+                b += math.log(8 / (640 / s) ** 2)  # obj (8 objects per 640 image)
+                mi.obj_pred.bias = torch.nn.Parameter(b.view(-1), requires_grad=True)
+                b = mi.cls_pred.bias.view(m.na, -1).detach()
+                b += math.log(0.6 / (m.nc - 0.999999)) if cf is None else torch.log(cf / cf.sum())  # cls
+                mi.cls_pred.bias = torch.nn.Parameter(b.view(-1), requires_grad=True)
